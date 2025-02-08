@@ -1,0 +1,172 @@
+use std::fmt::Pointer;
+use std::pin::Pin;
+use std::str::FromStr;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+use anyhow::{bail, Error, Result};
+
+use esp_idf_svc::hal::peripheral::{Peripheral, PeripheralRef};
+use esp_idf_svc::hal::{
+    delay::Ets, gpio::*, peripheral, peripherals::Peripherals, spi::config::*, spi::*,
+    units::FromValueType,
+};
+use esp_idf_svc::{eventloop::EspSystemEventLoop, wifi::*};
+use mipidsi::interface::{self, SpiInterface};
+
+use embedded_graphics::{
+    mono_font::{ascii::FONT_10X20, MonoTextStyle},
+    pixelcolor::*,
+    prelude::*,
+    text::*,
+};
+use mipidsi::{models::ST7789, options::*, Builder};
+
+mod comm;
+
+#[derive(Debug)]
+#[toml_cfg::toml_config]
+pub struct Config {
+    #[default("")]
+    wifi_ssid: &'static str,
+    #[default("")]
+    wifi_psk: &'static str,
+}
+
+fn initialize_runtime() {
+    esp_idf_svc::sys::link_patches();
+    esp_idf_svc::log::EspLogger::initialize_default();
+}
+
+fn spawn_lcd_thread(rx: mpsc::Receiver<String>) {
+    // Spawn a thread for the LCD
+    thread::spawn(move || {
+        println!("LCD thread started");
+
+        for message in rx {
+            println!("LCD received: {}", message);
+            thread::sleep(Duration::from_millis(100)); // Simulate LCD update delay
+            println!("LCD displayed: {}", message);
+        }
+        println!("LCD thread finished");
+    });
+}
+
+fn main() {
+    initialize_runtime();
+    println!("Main thread started");
+
+    // Create a channel for communication
+    let (tx, rx) = mpsc::channel();
+
+    // Spawn the LCD thread using a separate function
+    spawn_lcd_thread(rx);
+
+    // Main thread sends messages
+    for i in 1..=5 {
+        println!("Main thread sending: Message {}", i);
+        tx.send(format!("Message {}", i)).unwrap();
+        thread::sleep(Duration::from_secs(1));
+    }
+
+    // Close the channel
+    drop(tx);
+
+    println!("Main thread finished");
+}
+
+
+
+
+fn screen_thread(rx: mpsc::Receiver<String>) {
+    thread::spawn(move || {
+        println!("LCD thread started");
+        let peripherals = Peripherals::take().unwrap();
+        let spi = peripherals.spi2;
+
+        let mut delay = Ets;
+
+        // TODO: turn display initialization into a separate function.
+        let rst = PinDriver::input_output_od(peripherals.pins.gpio23).unwrap();
+        let dc = PinDriver::input_output_od(peripherals.pins.gpio16).unwrap();
+        let mut backlight = PinDriver::output(peripherals.pins.gpio4).unwrap();
+        let sclk = peripherals.pins.gpio18;
+        let sdo = peripherals.pins.gpio19;
+        let cs = peripherals.pins.gpio5;
+
+        let spi_driver = SpiDriver::new(
+            spi,
+            sclk,
+            sdo,
+            None::<AnyIOPin>,
+            &DriverConfig::new().dma(Dma::Channel1(240 * 135)),
+        )
+        .unwrap();
+
+        let spi_device_driver = SpiDeviceDriver::new(
+            spi_driver,
+            Some(cs),
+            &esp_idf_svc::hal::spi::config::Config::new()
+                .baudrate(26.MHz().into())
+                .data_mode(MODE_3),
+        )
+        .unwrap();
+
+        let mut spi_buffer = [0u8; 256]; // Buffer de 256 bytes
+        let spi_interface = SpiInterface::new(spi_device_driver, dc, &mut spi_buffer);
+        let mut display = Builder::new(ST7789, spi_interface)
+            .display_size(135, 240)
+            .display_offset(
+                52, // Move image up
+                40, // Move image right
+            )
+            .orientation(Orientation::new().rotate(Rotation::Deg90))
+            .invert_colors(ColorInversion::Inverted)
+            .reset_pin(rst)
+            .init(&mut delay)
+            .unwrap();
+
+        backlight.set_high().unwrap();
+
+        log::info!("Display initialized.");
+        for message in rx {
+            println!("LCD received: {}", message);
+
+            match parse_input(&message) {
+                Some(ParsedInput::Message(value)) => {
+                    println!("Message received: {}", value);
+                    display.clear(Rgb565::BLACK).unwrap();
+                    let character_style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
+                    let text = value;
+                    println!("Message to be printed: {}", text);
+                    match Text::with_alignment(
+                        text,
+                        display.bounding_box().center(),
+                        character_style,
+                        Alignment::Center,
+                    )
+                    .draw(&mut display)
+                    {
+                        Ok(_) => {
+                            println!("Text drawn successfully.");
+                        }
+                        Err(e) => {
+                            println!("Error drawing text: {:?}", e);
+                        }
+                    }
+                }
+                Some(ParsedInput::Action(value)) => {
+                    println!("Action received: {}", value);
+                    // Do something with the action value
+                }
+                None => println!("Invalid input: {}", message),
+            }
+
+            // Draw centered text.
+
+            log::info!("Display initialized.");
+        }
+        println!("LCD thread finished");
+    });
+}

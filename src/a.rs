@@ -1,0 +1,1 @@
+Result<mipidsi::Display<SpiInterface<'static, SpiDeviceDriver<'static, SpiDriver<'static>>, PinDriver<'static, AnyIOPin, InputOutput>>, ST7789, PinDriver<'static, AnyIOPin, InputOutput>>, GpioError>
