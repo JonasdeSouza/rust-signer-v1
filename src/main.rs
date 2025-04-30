@@ -27,12 +27,12 @@ use embedded_graphics::{
 };
 use mipidsi::{models::ST7789, options::*, Builder};
 
-use bitcoin::consensus::{encode, serialize, deserialize};
+use bitcoin::consensus::{deserialize, encode, serialize};
 use bitcoin::psbt::{self, serialize};
 use bitcoin::{Psbt, Transaction};
 use nvs::memory::nvs_example;
-use ui::display::{self, example_display};
 use std::io::{self, Write};
+use ui::display::{self, example_display};
 
 extern crate bitcoin;
 
@@ -60,10 +60,10 @@ fn initialize_runtime() {
     esp_idf_svc::log::EspLogger::initialize_default();
 }
 
-fn main(){
+fn main() {
     initialize_runtime();
-    // example_display();
+    example_display();
     // nvs_example();
     //config_and_connect_wifi();
-    sig_example();
+    //sig_example();
 }
