@@ -65,5 +65,5 @@ fn main() {
     example_display();
     // nvs_example();
     //config_and_connect_wifi();
-    //sig_example();
+    sig_example();
 }
