@@ -63,7 +63,7 @@ fn initialize_runtime() {
 fn main() {
     initialize_runtime();
     example_display();
-    // nvs_example();
+     nvs_example();
     //config_and_connect_wifi();
     sig_example();
 }

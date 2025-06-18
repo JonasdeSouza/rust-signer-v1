@@ -27,6 +27,68 @@ use embedded_graphics::{
 };
 use mipidsi::{models::ST7789, options::*, Builder};
 
+
+pub struct LcdController {
+    tx: mpsc::Sender<String>,
+    running: Arc<AtomicBool>,
+}
+
+impl LcdController {
+    pub fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        let running = Arc::new(AtomicBool::new(true));
+        
+        // Spawn the LCD thread
+        let lcd_running = Arc::clone(&running);
+        screen_thread(rx, lcd_running);
+        
+        // Give the thread time to initialize
+        thread::sleep(Duration::from_millis(100));
+        
+        Self { tx, running }
+    }
+    
+    /// Write a message to the LCD screen
+    pub fn write_message(&self, message: &str) -> Result<(), mpsc::SendError<String>> {
+        self.tx.send(format!("Message: {}", message))
+    }
+    
+    /// Clear the LCD screen
+    pub fn clear(&self) -> Result<(), mpsc::SendError<String>> {
+        self.tx.send("Action: clear".to_string())
+    }
+    
+    /// Turn off the LCD backlight
+    pub fn turn_off_backlight(&self) -> Result<(), mpsc::SendError<String>> {
+        self.tx.send("Action: backlight_off".to_string())
+    }
+    
+    /// Turn on the LCD backlight
+    pub fn turn_on_backlight(&self) -> Result<(), mpsc::SendError<String>> {
+        self.tx.send("Action: backlight_on".to_string())
+    }
+    
+    /// Display a multi-line message
+    pub fn write_lines(&self, lines: &[&str]) -> Result<(), mpsc::SendError<String>> {
+        let message = lines.join("\n");
+        self.write_message(&message)
+    }
+    
+    /// Shutdown the LCD thread and turn off the display
+    pub fn shutdown(self) {
+        // Turn off backlight before shutting down
+        let _ = self.turn_off_backlight();
+        thread::sleep(Duration::from_millis(50));
+        
+        // Signal thread to stop
+        self.running.store(false, Ordering::SeqCst);
+        
+        // Drop the sender to close the channel
+        drop(self.tx);
+    }
+}
+
+// Update your ParsedInput enum to handle more actions
 enum ParsedInput<'a> {
     Message(&'a str),
     Action(&'a str),
@@ -43,7 +105,8 @@ fn parse_input(input: &str) -> Option<ParsedInput> {
         None // Input does not match the expected format
     }
 }
-//rx: mpsc::Receiver<String>,
+
+// Update your screen_thread to handle the new actions
 fn screen_thread(rx: mpsc::Receiver<String>, running: Arc<AtomicBool>) {
     let builder = thread::Builder::new().stack_size(8192);
     builder
@@ -82,7 +145,7 @@ fn screen_thread(rx: mpsc::Receiver<String>, running: Arc<AtomicBool>) {
             )
             .expect("Failed to initialize SPI device driver");
 
-            let mut spi_buffer = [0u8; 256]; // Buffer of 256 bytes
+            let mut spi_buffer = [0u8; 256];
             let spi_interface = SpiInterface::new(spi_device_driver, dc, &mut spi_buffer);
             let mut display = Builder::new(ST7789, spi_interface)
                 .display_size(135, 240)
@@ -96,76 +159,136 @@ fn screen_thread(rx: mpsc::Receiver<String>, running: Arc<AtomicBool>) {
             backlight.set_high().expect("Failed to set backlight high");
 
             println!("Display initialized.");
-            println!("LCD thread started");
-            // Keep the thread running as long as `running` is true
+            
             while running.load(Ordering::SeqCst) {
-                match rx.recv() {
+                match rx.recv_timeout(Duration::from_millis(100)) {
                     Ok(message) => {
-                        println!("LCD received: {}", message);
-
                         match parse_input(&message) {
                             Some(ParsedInput::Message(value)) => {
-                                println!("Message received: {}", value);
                                 display
                                     .clear(Rgb565::BLACK)
                                     .expect("Failed to clear display");
-                                let character_style =
-                                    MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
-                                match Text::with_alignment(
-                                    value,
-                                    display.bounding_box().center(),
-                                    character_style,
-                                    Alignment::Center,
-                                )
-                                .draw(&mut display)
-                                {
-                                    Ok(_) => println!("Text drawn successfully."),
-                                    Err(e) => println!("Error drawing text: {:?}", e),
+                                
+                                // Handle multi-line text
+                                let lines: Vec<&str> = value.split('\n').collect();
+                                let character_style = MonoTextStyle::new(&FONT_10X20, Rgb565::WHITE);
+                                
+                                // Calculate starting Y position for centered text
+                                let line_height = 22; // Adjust based on your font
+                                let total_height = lines.len() as i32 * line_height;
+                                let start_y = (display.bounding_box().size.height as i32 - total_height) / 2;
+                                
+                                for (i, line) in lines.iter().enumerate() {
+                                    let y_pos = start_y + (i as i32 * line_height) + line_height/2;
+                                    let position = Point::new(
+                                        display.bounding_box().center().x,
+                                        y_pos
+                                    );
+                                    
+                                    Text::with_alignment(
+                                        line,
+                                        position,
+                                        character_style,
+                                        Alignment::Center,
+                                    )
+                                    .draw(&mut display)
+                                    .expect("Failed to draw text");
                                 }
                             }
                             Some(ParsedInput::Action(value)) => {
-                                println!("Action received: {}", value);
-                                // Handle action here
+                                match value {
+                                    "clear" => {
+                                        display
+                                            .clear(Rgb565::BLACK)
+                                            .expect("Failed to clear display");
+                                    }
+                                    "backlight_off" => {
+                                        backlight.set_low().expect("Failed to turn off backlight");
+                                    }
+                                    "backlight_on" => {
+                                        backlight.set_high().expect("Failed to turn on backlight");
+                                    }
+                                    _ => println!("Unknown action: {}", value),
+                                }
                             }
                             None => println!("Invalid input: {}", message),
                         }
                     }
-                    Err(_) => {
-                        println!("Error receiving message.");
-                        break; // Exit if receiving fails (channel disconnected)
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        // Continue checking if thread should stop
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        println!("Channel disconnected, stopping LCD thread");
+                        break;
                     }
                 }
             }
+            
+            // Clean up before exiting
+            display.clear(Rgb565::BLACK).ok();
+            backlight.set_low().ok();
+            println!("LCD thread stopped");
         })
         .expect("Thread spawn failed");
 }
 
+// Simple helper functions if you prefer not to use the struct
+pub fn write_lcd(controller: &LcdController, message: &str) {
+    controller.write_message(message)
+        .expect("Failed to write to LCD");
+}
+
+pub fn turn_off_lcd(controller: LcdController) {
+    controller.shutdown();
+}
+
+// Example usage
 pub fn example_display() -> Result<()> {
-    let (tx_lcd, rx_lcd) = mpsc::channel();
-    let running = Arc::new(AtomicBool::new(true));
-
-    // Spawn the LCD thread and pass the `running` flag to keep it active
-    let lcd_running = Arc::clone(&running);
-    screen_thread(rx_lcd, lcd_running);
-
-    // Send messages to the LCD thread
-    tx_lcd
-        .send(format!("Message: Hello"))
-        .expect("Failed to send message: Hello");
+    // Create the LCD controller
+    let lcd = LcdController::new();
+    
+    // Simple message
+    lcd.write_message("Hello ESP32!")?;
     thread::sleep(Duration::from_secs(2));
-    tx_lcd
-        .send(format!("Message: Goodbye"))
-        .expect("Failed to send message: Goodbye");
-
-    // Stop the thread after some time by setting `running` to false
+    
+    // Multi-line message
+    lcd.write_lines(&[
+        "Bitcoin Signer",
+        "Ready to sign",
+        "transactions"
+    ])?;
     thread::sleep(Duration::from_secs(2));
-    running.store(false, Ordering::SeqCst); // Signal to stop the thread
-    drop(tx_lcd); // Close the channel
-
-    // Wait for the LCD thread to finish before exiting main
+    
+    // Clear screen
+    lcd.clear()?;
     thread::sleep(Duration::from_secs(1));
-
+    
+    // Another message
+    lcd.write_message("Signing...")?;
+    thread::sleep(Duration::from_secs(2));
+    
+    // Turn off backlight
+    lcd.turn_off_backlight()?;
+    thread::sleep(Duration::from_secs(1));
+    
+    // Turn on backlight
+    lcd.turn_on_backlight()?;
+    lcd.write_message("Done!")?;
+    thread::sleep(Duration::from_secs(2));
+    
+    // Shutdown the LCD
+    lcd.shutdown();
+    
     println!("Main finished.");
-
     Ok(())
+}
+
+// For your Bitcoin transaction signing workflow, you could use it like:
+pub fn display_transaction_info(lcd: &LcdController, tx_id: &str, amount: &str) {
+    lcd.write_lines(&[
+        "Transaction:",
+        &format!("ID: {}...", &tx_id[..8]),
+        &format!("Amount: {}", amount),
+        "Press OK to sign"
+    ]).expect("Failed to display transaction info");
 }
